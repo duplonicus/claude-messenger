@@ -1,0 +1,26 @@
+[Unit]
+Description=WhatsApp bridge for the messenger MCP server (127.0.0.1:8080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# @ROOT@ is filled in by scripts/setup.sh.
+# The bridge keeps its session, history and API token in ./store
+WorkingDirectory=@ROOT@/vendor/whatsapp-mcp/whatsapp-bridge
+ExecStart=@ROOT@/vendor/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
+# Send-only setup: don't forward incoming messages anywhere, don't pull media.
+Environment=WEBHOOK_ENABLED=false
+Environment=WHATSAPP_AUTO_DOWNLOAD_MEDIA=false
+Environment=WHATSAPP_BRIDGE_PORT=8080
+Environment="WHATSAPP_DEVICE_NAME=Claude messenger"
+UMask=0077
+Restart=on-failure
+RestartSec=30
+# Upstream logs at DEBUG with no switch; the journal rotates, a file would not.
+# Read it (and the pairing QR) with: journalctl --user -u whatsapp-bridge -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

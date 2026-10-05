@@ -1,0 +1,111 @@
+# Optional: a local Jaeger and Prometheus for the server's traces and metrics.
+# Everything binds to 127.0.0.1. Start it with scripts/observability.sh up.
+#
+# Jaeger    http://localhost:16686   traces, and the Monitor tab (rate, errors, latency per tool)
+# Prometheus http://localhost:9090   metrics
+#
+# The server PUSHES to both over OTLP, so there is nothing to scrape and no
+# prometheus.yml. That needs --web.enable-otlp-receiver; the other Prometheus
+# flags are the image's own defaults, restated because `command` replaces them.
+name: messenger-observability
+
+services:
+  jaeger:
+    image: jaegertracing/jaeger:latest
+    command: ["--config", "/etc/jaeger/config.yaml"]
+    configs:
+      - source: jaeger-config
+        target: /etc/jaeger/config.yaml
+      - source: jaeger-ui
+        target: /etc/jaeger/ui.json
+    ports:
+      - "127.0.0.1:16686:16686"  # web UI
+      - "127.0.0.1:4318:4318"    # OTLP over HTTP (traces in)
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-otlp-receiver
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+
+configs:
+  # Jaeger 2.x config (an OpenTelemetry Collector config). Based on upstream's
+  # cmd/jaeger/config-spm.yaml at v2.21.0, with one change: span metrics are
+  # pushed to Prometheus over OTLP instead of exposed on :8889 for scraping.
+  # No ${...} in here: compose would try to interpolate it.
+  jaeger-config:
+    content: |
+      service:
+        extensions: [jaeger_storage, jaeger_query]
+        pipelines:
+          traces:
+            receivers: [otlp]
+            processors: [batch]
+            exporters: [jaeger_storage_exporter, span_metrics]
+          metrics/span_metrics:
+            receivers: [span_metrics]
+            exporters: [otlp_http]
+        telemetry:
+          logs:
+            level: info
+
+      extensions:
+        jaeger_query:
+          storage:
+            traces: some_storage
+            metrics: some_metrics_storage
+          ui:
+            config_file: /etc/jaeger/ui.json
+        jaeger_storage:
+          backends:
+            some_storage:
+              memory:
+                max_traces: 100000
+          metric_backends:
+            some_metrics_storage:
+              prometheus:
+                endpoint: http://prometheus:9090
+                # Prometheus adds _total and _milliseconds when it ingests OTLP.
+                normalize_calls: true
+                normalize_duration: true
+
+      connectors:
+        span_metrics:
+          metrics_flush_interval: 15s
+
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: "0.0.0.0:4317"
+            http:
+              endpoint: "0.0.0.0:4318"
+
+      processors:
+        batch:
+
+      exporters:
+        jaeger_storage_exporter:
+          trace_storage: some_storage
+        otlp_http:
+          metrics_endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
+
+  jaeger-ui:
+    content: |
+      {
+        "monitor": { "menuEnabled": true },
+        "dependencies": { "menuEnabled": true }
+      }

@@ -1,0 +1,17 @@
+.venv
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# secrets and personal data
+.env
+config/contacts.json
+logs/
+
+# upstream WhatsApp bridge: its own repo, pinned in scripts/install-bridge.sh.
+# Holds the WhatsApp session keys and message history under store/.
+vendor/
+
+# local notes and agent worktrees
+/NOW.md
+.claude/

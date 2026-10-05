@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy to contacts.json (gitignored). Aliases ignore case. WhatsApp id: a JID, or just country code + number. Discord id: Developer Mode -> right-click user -> Copy User ID.",
+  "me": { "platform": "whatsapp", "id": "15551234567" },
+  "mom": { "platform": "whatsapp", "id": "15557654321@s.whatsapp.net" },
+  "zoe": { "platform": "discord", "id": "123456789012345678" }
+}
