@@ -161,7 +161,8 @@ def talk(proc, wait_for_id=2, timeout=20):
 def stop(proc):
     proc.send_signal(signal.SIGTERM)
     try:
-        out, err = proc.communicate(timeout=15)
+        # Against a dead collector the final flush alone takes about 15 s, so 15 was a coin toss.
+        out, err = proc.communicate(timeout=45)
     except subprocess.TimeoutExpired:
         proc.kill()
         raise
