@@ -41,57 +41,17 @@ The server opens no listening port. The only network listener in the system is t
 
 ## What runs
 
-```mermaid
-flowchart TB
-    subgraph clientbox["MCP client"]
-        app["Claude Desktop or Claude Code"]
-    end
+| Module | Job |
+|---|---|
+| `scripts/run-server.sh` | What the client actually starts. Runs the project's Python with `-m messenger.server` |
+| `server.py` | The six tools and the instructions sent to the client |
+| `directory.py` | Who is reachable on WhatsApp. Reads the bridge's SQLite files, read-only |
+| `contacts.py` | Loads and checks the alias file |
+| `whatsapp.py` | The HTTP call to the bridge |
+| `discord.py` | The two HTTPS calls to Discord |
+| `telemetry.py` | Logs, traces and metrics |
 
-    subgraph proc["messenger process, one per client connection"]
-        launcher["scripts/run-server.sh"]
-        srv["server.py<br/>FastMCP, 6 tools"]
-        dir["directory.py<br/>who is reachable"]
-        con["contacts.py<br/>alias file"]
-        waMod["whatsapp.py"]
-        dcMod["discord.py"]
-        tel["telemetry.py<br/>logs, traces, metrics"]
-    end
-
-    subgraph svc["systemd user service"]
-        bridge["whatsapp-bridge<br/>Go binary, 127.0.0.1:8080"]
-    end
-
-    subgraph files["Files on disk"]
-        alias[("config/contacts.json")]
-        env[(".env")]
-        store[("bridge store<br/>whatsapp.db, messages.db, token")]
-        logs[("logs/server.log<br/>logs/sent.log")]
-    end
-
-    subgraph docker["Docker, optional"]
-        jaeger["Jaeger"]
-        prom["Prometheus"]
-    end
-
-    app -- "stdin and stdout" --> launcher --> srv
-    srv --> dir
-    srv --> con
-    srv --> waMod
-    srv --> dcMod
-    srv --> tel
-    con --> alias
-    dir -- "read-only SQLite" --> store
-    dir --> alias
-    waMod -- "HTTP" --> bridge
-    waMod -- "reads token" --> store
-    bridge -- "writes" --> store
-    dcMod -- "HTTPS" --> dc["Discord"]
-    srv --> env
-    tel --> logs
-    tel -. "OTLP" .-> jaeger
-    tel -. "OTLP" .-> prom
-    jaeger -. "span metrics" .-> prom
-```
+Those modules are one process. Around it:
 
 | Piece | Lifetime | Notes |
 |---|---|---|
@@ -120,51 +80,26 @@ flowchart TB
 
 ### WhatsApp
 
-```mermaid
-sequenceDiagram
-    participant C as MCP client
-    participant S as server.py
-    participant D as directory.py
-    participant DB as bridge SQLite store
-    participant B as WhatsApp bridge
-    participant W as WhatsApp
-
-    C->>S: send_whatsapp(to, text)
-    S->>S: refuse if text is empty
-    S->>D: resolve_recipient(to)
-    D->>DB: read contacts, chats, linked IDs, archived
-    D-->>S: one JID and a display name
-    S->>B: POST /api/send with JID and text
-    B->>W: send as the linked account
-    W-->>B: accepted
-    B-->>S: 200, success true
-    S->>S: append a line to logs/sent.log
-    S-->>C: Sent to NAME (JID) on WhatsApp.
-```
+1. The client calls `send_whatsapp(to, text)`.
+2. `server.py` refuses if the text is empty.
+3. `directory.py` reads the bridge's SQLite store and turns `to` into one JID and a display name. If it cannot settle on exactly one, it stops here and nothing is sent.
+4. `whatsapp.py` sends `POST /api/send` to the bridge on loopback, with the JID, the text and the bearer token.
+5. The bridge sends the message to WhatsApp as the linked account and answers `200` with `success: true`.
+6. `server.py` appends one line to `logs/sent.log`.
+7. The client gets back `Sent to NAME (JID) on WhatsApp.`
 
 The text goes out exactly as given. No signature is added, because the recipient sees it as the user writing.
 
 ### Discord
 
-```mermaid
-sequenceDiagram
-    participant C as MCP client
-    participant S as server.py
-    participant A as contacts.py
-    participant X as Discord REST API
-
-    C->>S: send_discord_dm(alias, text)
-    S->>S: refuse if text is empty
-    S->>A: resolve(alias, discord)
-    A-->>S: user ID
-    S->>S: append the -claude signature, check 2000 characters
-    S->>X: POST /users/@me/channels with recipient_id
-    X-->>S: DM channel ID
-    S->>X: POST /channels/ID/messages with content
-    X-->>S: message ID
-    S->>S: append a line to logs/sent.log
-    S-->>C: Sent to ALIAS on Discord.
-```
+1. The client calls `send_discord_dm(alias, text)`.
+2. `server.py` refuses if the text is empty.
+3. `contacts.py` looks the alias up and checks it is a Discord alias. That gives a user ID.
+4. `discord.py` appends the ` -claude` signature and refuses if the result is over 2000 characters.
+5. First request: `POST /users/@me/channels` with the user ID. Discord answers with the DM channel's ID.
+6. Second request: `POST /channels/ID/messages` with the text. Discord answers with the message ID.
+7. `server.py` appends one line to `logs/sent.log`.
+8. The client gets back `Sent to ALIAS on Discord.`
 
 Discord sends are alias-only. The message comes from the bot account, so ` -claude` is appended to every one.
 
@@ -196,30 +131,29 @@ This is the core logic. `directory.resolve_recipient` turns whatever the user sa
 
 ```mermaid
 flowchart TD
-    start["to: what the user said"] --> alias{"WhatsApp alias in<br/>contacts.json?"}
-    alias -- yes --> sendAlias["Use the alias's JID"]
-    alias -- no --> shape{"Looks like a JID<br/>or a phone number?"}
-    shape -- no --> search
-    shape -- yes --> known{"Exact JID in the directory,<br/>or typed with an @?"}
-    known -- yes --> sendJid["Use that JID"]
-    known -- no --> tail{"Saved numbers that<br/>END with these digits?"}
-    tail -- "more than one" --> amb["Ambiguous:<br/>send nothing, return the matches"]
-    tail -- "exactly one" --> sendTail["Use that contact's JID"]
-    tail -- none --> long{"10 or more digits?"}
-    long -- yes --> sendNew["Use the number as typed"]
-    long -- no --> search["Search names and numbers"]
-    search --> hits{"Matches?"}
-    hits -- none --> miss["Refuse: no match"]
-    hits -- "some" --> exact{"Any whose whole<br/>name is the query?"}
-    exact -- yes --> pool["Keep only the exact ones"]
-    exact -- no --> pool2["Keep all partial matches"]
-    pool --> one{"Exactly one left?"}
-    pool2 --> one
-    one -- yes --> sendName["Use that JID"]
-    one -- no --> amb
+    start["What the user said"] --> alias{"Is it a WhatsApp alias?"}
+    alias -- yes --> send["Send to that one JID"]
+    alias -- no --> num{"Is it a JID or<br/>a phone number?"}
+    num -- yes --> send
+    num -- no --> name["Search names"]
+    name --> count{"How many people fit?"}
+    count -- one --> send
+    count -- none --> refuse["Send nothing:<br/>no match"]
+    count -- "more than one" --> ask["Send nothing:<br/>return the matches"]
 ```
 
-The directory it searches is rebuilt from disk on every call (`load_directory`):
+The chart is the short version. The rules in full, tried in this order:
+
+1. **Alias.** If it is a WhatsApp alias in `config/contacts.json`, use that alias's JID.
+2. **JID.** If it is a full JID (it has an `@`), use it as typed.
+3. **Phone number.** If it is digits:
+   - a number that exactly matches a known contact is used;
+   - otherwise, saved numbers that END with those digits are looked up. One hit is used, more than one is refused as ambiguous. This is what lets a number typed without its country code find the saved contact it belongs to;
+   - otherwise, 10 or more digits is treated as a complete number and used as typed;
+   - anything shorter falls through to the name search.
+4. **Name.** Search every name and number. If some contacts have the query as their whole name, only those count; otherwise every partial match counts. Exactly one left: use it. None: refuse. More than one: refuse and return the matches.
+
+The directory that the name search runs over is rebuilt from disk on every call (`load_directory`):
 
 1. Read the linked-ID map. WhatsApp can know one person by a phone number and by a "linked ID" (`@lid`). Each linked ID is rewritten to its phone-number JID, so one person is one entry.
 2. Read the set of archived chats and drop them. They cannot be found by name or listed. An alias, a full number or a JID still reaches one.
@@ -227,8 +161,6 @@ The directory it searches is rebuilt from disk on every call (`load_directory`):
 4. A one-to-one chat whose "name" is just its own number is treated as having no name.
 
 Search rules: the query matches if it is contained in any name (case-insensitive), or if it has at least 4 digits and those digits appear in the number. Whole-name matches sort first.
-
-The tail match in the middle of the chart is what lets a number typed without its country code find the saved contact it belongs to.
 
 ## Tool surface
 
@@ -292,21 +224,7 @@ Settings:
 
 ## Observability
 
-One decorator, `telemetry.observed`, produces all three signals for every tool call.
-
-```mermaid
-flowchart LR
-    call["Tool call"] --> obs["observed wrapper"]
-    obs --> line["JSON log line<br/>tool, call ID, masked recipient,<br/>chars, ms, outcome"]
-    obs -. "if traces on" .-> span["SERVER span<br/>same fields as attributes"]
-    obs -. "if metrics on" .-> met["Counter and histogram<br/>labels: tool, outcome"]
-    line --> stderr["stderr<br/>captured by the client"]
-    line --> file["logs/server.log"]
-    span -- "OTLP, batched" --> jaeger["Jaeger"]
-    httpx["httpx auto-instrumentation"] -. "child spans" .-> jaeger
-    met -- "OTLP push every 15 s" --> prom["Prometheus"]
-    jaeger -- "span metrics" --> prom
-```
+One decorator, `telemetry.observed`, produces all three signals for every tool call: a log line always, a span if traces are on, and two metrics if metrics are on. Jaeger also derives its own per-tool metrics from the spans and stores them in Prometheus.
 
 | Signal | What is recorded | What is never recorded |
 |---|---|---|
@@ -330,21 +248,16 @@ Three scripts cover the rest: `scripts/doctor.py` connects the way a client does
 
 There is no deploy step and no CI. The server runs from a checkout.
 
-```mermaid
-flowchart TD
-    clone["git clone"] --> setup["scripts/setup.sh"]
-    setup --> venv["uv venv, install the package,<br/>turn on the pre-commit hook"]
-    venv --> files["Create config/contacts.json and .env<br/>if missing"]
-    files --> q1{"Confirm before<br/>every send?"}
-    q1 --> envset["Write MESSENGER_CONFIRM_SENDS to .env"]
-    envset --> q2{"Set up WhatsApp?<br/>default no"}
-    q2 -- no --> reg
-    q2 -- yes --> build["install-bridge.sh:<br/>clone at the pinned commit, go build"]
-    build --> unit["Fill in the systemd unit template,<br/>enable and start whatsapp-bridge"]
-    unit --> pair["scripts/pair.sh:<br/>scan the QR from the phone"]
-    pair --> reg["Register scripts/run-server.sh<br/>with the MCP client"]
-    reg --> doctor["scripts/doctor.py"]
-```
+1. `git clone`, then `scripts/setup.sh`.
+2. It creates the virtual environment, installs the package and turns on the pre-commit hook.
+3. It creates `config/contacts.json` and `.env` if they are missing.
+4. It asks "confirm before every send?" and writes the answer to `.env` as `MESSENGER_CONFIRM_SENDS`.
+5. It asks "set up WhatsApp?" (default no). On yes:
+   - `install-bridge.sh` clones the bridge at the pinned commit and builds it;
+   - the systemd unit template is filled in, and `whatsapp-bridge` is enabled and started;
+   - `scripts/pair.sh` shows the QR code to scan from the phone.
+6. It prints the line that registers `scripts/run-server.sh` with the MCP client.
+7. `scripts/doctor.py` checks the result.
 
 - **Launch:** the client runs `scripts/run-server.sh`, which execs the project's own Python with `-m messenger.server`. On Windows, Claude Desktop reaches it through `wsl.exe`.
 - **Updating:** pull, then restart the MCP client. The client does not restart a server that was stopped from outside.
