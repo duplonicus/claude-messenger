@@ -6,6 +6,8 @@ Say "tell Zoe I'll be there in a minute" and it goes out. It sends only when you
 
 It is also a worked example of making a tiny server observable: structured logs, OpenTelemetry traces and metrics, a `doctor` script that connects the way a client does, and the MCP Inspector wired in. See [Debugging](#debugging).
 
+How it fits together, with diagrams: [ARCHITECTURE.md](ARCHITECTURE.md).
+
 Linux only, including WSL. Not tested on macOS, and the WhatsApp part needs systemd.
 
 ## Tools
